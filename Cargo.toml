@@ -11,7 +11,7 @@ name = "system76-firmware-cli"
 path = "src/bin/cli.rs"
 
 [dependencies]
-buildchain = "0.4.9"
+buildchain = "0.4.10"
 ecflash = { git = "https://github.com/system76/ecflash.git", branch = "stable" }
 libc = "0.2.58"
 plain = "0.2.3"
@@ -23,6 +23,7 @@ tar = "0.4.26"
 tempdir = "0.3.7"
 uuid = "0.7.4"
 err-derive = "0.1.5"
+bincode = "1.1.4"
 
 [profile.release]
 lto = true

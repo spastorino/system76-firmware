@@ -10,7 +10,7 @@ extern crate tar;
 extern crate tempdir;
 extern crate uuid;
 
-use buildchain::{Downloader, Manifest};
+use buildchain::{Block, Downloader, Manifest};
 use std::fs;
 use std::path::Path;
 
@@ -32,6 +32,8 @@ pub use thelio_io::{
     ThelioIo, ThelioIoMetadata,
     thelio_io_download, thelio_io_list, thelio_io_update
 };
+
+const SECONDS_IN_DAY: u64 = 60 * 60 * 24;
 
 const MODEL_WHITELIST: &[&str] = &[
     "addw1",
@@ -121,7 +123,10 @@ pub fn download() -> Result<(String, String), String> {
         Some(config::CERT)
     )?;
 
-    let tail = dl.tail()?;
+    let tail = {
+        let path = Path::new(config::CACHE).join("tail");
+        cached_block(&path, SECONDS_IN_DAY, || dl.tail())?
+    };
 
     let cache = download::Cache::new(config::CACHE, Some(dl))?;
 
@@ -146,6 +151,46 @@ pub fn download() -> Result<(String, String), String> {
     let changelog = util::extract_file(&firmware_data, "./changelog.json").map_err(err_str)?;
 
     Ok((tail.digest.to_string(), changelog))
+}
+
+/// Retrieves a `Block` from the cached path if it exists and the modified time is recent.
+///
+/// - If the modified time is older than `stale_after` seconds, the cache will be updated.
+/// - The most recent `Block` from cache will be returned after the cache is updated.
+/// - If the cache does not require an update, it will be returned after being deserialized.
+fn cached_block<F: FnMut() -> Result<Block, String>>(
+    path: &Path,
+    stale_after: u64,
+    mut func: F
+) -> Result<Block, String>  {
+    // - Fetch the timestamp of the cached tail block
+    // - If recent, attempt to deserialize it
+    let read_cache = |modified| -> Result<Option<Block>, String> {
+        let now = timestamp::current();
+        let cached_tail = if timestamp::exceeded(modified, now, stale_after) {
+            None
+        } else {
+            let file = fs::File::open(&path).map_err(err_str)?;
+            let block = bincode::deserialize_from(file).map_err(err_str)?;
+
+            Some(block)
+        };
+
+        Ok(cached_tail)
+    };
+
+    // Fetches a new tail block
+    let mut update_cache = || {
+        let block = func()?;
+        let file = fs::File::create(&path).map_err(err_str)?;
+        bincode::serialize_into(file, &block).map_err(err_str)?;
+        Ok(block)
+    };
+
+    match timestamp::modified_since_unix(&path) {
+        Ok(modified) => read_cache(modified)?.map_or_else(update_cache, Result::Ok),
+        Err(_) => update_cache()
+    }
 }
 
 fn extract<P: AsRef<Path>>(digest: &str, file: &str, path: P) -> Result<(), String> {
@@ -223,4 +268,30 @@ pub fn unschedule() -> Result<(), String> {
     eprintln!("Firmware update cancelled.");
 
     Ok(())
+}
+
+mod timestamp {
+    use std::{io, path::Path, time::{Duration, SystemTime}};
+
+    /// Convenience function for fetching the current time in seconds since the UNIX Epoch.
+    pub fn current() -> u64 {
+        seconds_since_unix(SystemTime::now())
+    }
+
+    pub fn modified_since_unix(path: &Path) -> io::Result<u64> {
+        path.metadata()
+            .and_then(|md| md.modified())
+            .map(seconds_since_unix)
+    }
+
+    pub fn seconds_since_unix(time: SystemTime) -> u64 {
+        time.duration_since(SystemTime::UNIX_EPOCH)
+            .as_ref()
+            .map(Duration::as_secs)
+            .unwrap_or(0)
+    }
+
+    pub fn exceeded(last: u64, current: u64, limit: u64) -> bool {
+        current == 0 || last > current || current - last > limit
+    }
 }
